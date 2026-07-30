@@ -10,7 +10,7 @@
   <title>工作台</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="marked.min.js"></script>
   <style>
 /* ===== 基础变量 ===== */
 :root {
@@ -87,6 +87,45 @@ body { min-height: 100vh; min-height: 100dvh; }
   font-size: 20px;
   font-weight: 800;
   letter-spacing: -0.5px;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sync-status {
+  min-height: 34px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sync-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.sync-status.status-syncing .sync-dot { background: var(--warning); animation: syncPulse 1s infinite; }
+.sync-status.status-synced .sync-dot { background: var(--success); }
+.sync-status.status-pending .sync-dot { background: var(--warning); }
+.sync-status.status-error .sync-dot { background: var(--danger); }
+
+@keyframes syncPulse {
+  50% { opacity: 0.35; transform: scale(0.75); }
 }
 
 .topbar-search-btn {
@@ -780,6 +819,31 @@ body { min-height: 100vh; min-height: 100dvh; }
 .settings-label { font-size: 15px; font-weight: 600; }
 .settings-desc { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 
+.cloud-status-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  margin-bottom: 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.cloud-status-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--primary-light);
+  font-size: 20px;
+}
+
+.cloud-status-copy { flex: 1; min-width: 0; }
+.cloud-status-title { font-size: 14px; font-weight: 700; }
+.cloud-status-detail { font-size: 12px; color: var(--text-secondary); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+
 .data-stats { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 8px; margin-bottom: 16px; }
 .data-stat { text-align: center; padding: 14px 8px; background: var(--bg); border-radius: var(--radius-sm); }
 .data-stat-value { font-size: 22px; font-weight: 800; color: var(--primary); }
@@ -898,9 +962,15 @@ body { min-height: 100vh; min-height: 100dvh; }
   <div id="app">
     <header class="topbar">
       <div class="topbar-title" id="pageTitle">工作台</div>
-      <button class="topbar-search-btn" onclick="App.openSearch()" aria-label="搜索">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      </button>
+      <div class="topbar-actions">
+        <button class="sync-status status-local" id="syncStatusButton" onclick="App.openCloudPanel()" aria-label="云端同步状态">
+          <span class="sync-dot"></span>
+          <span id="syncStatusLabel">本地模式</span>
+        </button>
+        <button class="topbar-search-btn" onclick="App.openSearch()" aria-label="搜索">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        </button>
+      </div>
     </header>
 
     <div class="content" id="content"></div>
@@ -968,6 +1038,9 @@ body { min-height: 100vh; min-height: 100dvh; }
 
   <div class="toast" id="toast"></div>
 
+  <script src="supabase.min.js"></script>
+  <script src="config.js"></script>
+  <script src="cloud.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
