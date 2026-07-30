@@ -858,12 +858,19 @@ body { min-height: 100vh; min-height: 100dvh; }
   font-weight: 600;
   box-shadow: var(--shadow-lg);
   z-index: 2000;
-  transition: transform 0.3s ease;
+  opacity: 0;
+  visibility: hidden;
+  transition: transform 0.3s ease, opacity 0.2s ease, visibility 0s linear 0.3s;
   pointer-events: none;
   white-space: nowrap;
 }
 
-.toast.show { transform: translateX(-50%) translateY(0); }
+.toast.show {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
 
 /* ===== 滚动条 ===== */
 ::-webkit-scrollbar { width: 0px; height: 0px; }
