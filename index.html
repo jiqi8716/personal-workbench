@@ -14,7 +14,7 @@
   <style>
 /* ===== 基础变量 ===== */
 :root {
-  --bg: #f5f6f8;
+  --bg: #eef3f9;
   --surface: #ffffff;
   --surface-hover: #f3f4f6;
   --border: #e8eaed;
@@ -339,7 +339,24 @@ body { min-height: 100vh; min-height: 100dvh; }
 }
 
 .section-title { font-size: 16px; font-weight: 700; }
-.section-more { font-size: 13px; color: var(--primary); font-weight: 600; cursor: pointer; }
+.section-more {
+  border: none;
+  border-radius: 999px;
+  padding: 7px 14px;
+  background: var(--primary-light);
+  color: var(--primary);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.section-more:active {
+  background: #dfe5fd;
+  transform: scale(0.97);
+}
 
 .section-body { padding: 0 8px 8px; }
 
