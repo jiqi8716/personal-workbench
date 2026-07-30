@@ -26,7 +26,13 @@
     calendarCursor: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
     selectedDate: toDateInput(new Date()),
     currentNoteId: null,
-    toastTimer: null
+    toastTimer: null,
+    cloudStatus: {
+      code: 'local',
+      label: '本地模式',
+      detail: '登录后启用云端同步',
+      session: null
+    }
   };
 
   function uid(prefix) {
@@ -70,16 +76,27 @@
     }).format(new Date(value));
   }
 
+  function normalizeData(data) {
+    const normalized = emptyState();
+    const fallbackTime = new Date().toISOString();
+    Object.keys(normalized).forEach(collection => {
+      normalized[collection] = Array.isArray(data?.[collection])
+        ? data[collection].map(item => ({
+            ...item,
+            createdAt: item.createdAt || item.updatedAt || fallbackTime,
+            updatedAt: item.updatedAt || item.createdAt || fallbackTime
+          }))
+        : [];
+    });
+    return normalized;
+  }
+
   function load() {
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
       if (saved && typeof saved === 'object') {
-        state.data = {
-          tasks: Array.isArray(saved.tasks) ? saved.tasks : [],
-          notes: Array.isArray(saved.notes) ? saved.notes : [],
-          events: Array.isArray(saved.events) ? saved.events : [],
-          resources: Array.isArray(saved.resources) ? saved.resources : []
-        };
+        state.data = normalizeData(saved);
+        save();
       }
     } catch (error) {
       console.warn('无法读取本地数据：', error);
@@ -89,6 +106,14 @@
 
   function save() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
+  }
+
+  function queueUpsert(collection, item) {
+    window.WorkbenchCloud?.queueUpsert(collection, item);
+  }
+
+  function queueDelete(collection, id, deletedAt = new Date().toISOString()) {
+    window.WorkbenchCloud?.queueDelete(collection, id, deletedAt);
   }
 
   function content() {
@@ -303,6 +328,7 @@
     if (existing) Object.assign(existing, task);
     else state.data.tasks.unshift(task);
     save();
+    queueUpsert('tasks', task);
     closeModal();
     render();
     toast('任务已保存');
@@ -312,6 +338,7 @@
     if (!confirm('确定删除这个任务吗？')) return;
     state.data.tasks = state.data.tasks.filter(task => task.id !== id);
     save();
+    queueDelete('tasks', id);
     closeModal();
     render();
     toast('任务已删除');
@@ -344,6 +371,7 @@
     };
     state.data.notes.unshift(note);
     save();
+    queueUpsert('notes', note);
     openNote(note.id);
   }
 
@@ -367,6 +395,7 @@
     note.title = document.getElementById('noteTitleInput').value;
     note.updatedAt = new Date().toISOString();
     save();
+    queueUpsert('notes', note);
   }
 
   function updateNoteContent() {
@@ -375,6 +404,7 @@
     note.content = document.getElementById('noteTextarea').value;
     note.updatedAt = new Date().toISOString();
     save();
+    queueUpsert('notes', note);
   }
 
   function switchNoteTab(tab) {
@@ -414,8 +444,10 @@
 
   function deleteNoteCurrent() {
     if (!state.currentNoteId || !confirm('确定删除这篇笔记吗？')) return;
+    const deletedId = state.currentNoteId;
     state.data.notes = state.data.notes.filter(note => note.id !== state.currentNoteId);
     save();
+    queueDelete('notes', deletedId);
     closeNoteEditor();
     toast('笔记已删除');
   }
@@ -525,7 +557,9 @@
       title: form.get('title').trim(),
       date: form.get('date'),
       time: form.get('time'),
-      note: form.get('note').trim()
+      note: form.get('note').trim(),
+      createdAt: existing?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
     if (existing) Object.assign(existing, item);
     else state.data.events.push(item);
@@ -533,6 +567,7 @@
     const selected = new Date(`${item.date}T00:00:00`);
     state.calendarCursor = new Date(selected.getFullYear(), selected.getMonth(), 1);
     save();
+    queueUpsert('events', item);
     closeModal();
     render();
     toast('日程已保存');
@@ -542,6 +577,7 @@
     if (!confirm('确定删除这个日程吗？')) return;
     state.data.events = state.data.events.filter(event => event.id !== id);
     save();
+    queueDelete('events', id);
     closeModal();
     render();
     toast('日程已删除');
@@ -639,11 +675,14 @@
       type: form.get('type'),
       url: form.get('url').trim(),
       description: form.get('description').trim(),
-      tags: form.get('tags').split(/[,，]/).map(tag => tag.trim()).filter(Boolean).slice(0, 8)
+      tags: form.get('tags').split(/[,，]/).map(tag => tag.trim()).filter(Boolean).slice(0, 8),
+      createdAt: existing?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
     if (existing) Object.assign(existing, item);
     else state.data.resources.unshift(item);
     save();
+    queueUpsert('resources', item);
     closeModal();
     render();
     toast('资源已保存');
@@ -653,14 +692,31 @@
     if (!confirm('确定删除这个资源吗？')) return;
     state.data.resources = state.data.resources.filter(item => item.id !== id);
     save();
+    queueDelete('resources', id);
     closeModal();
     render();
     toast('资源已删除');
   }
 
   function renderSettings() {
+    const cloud = state.cloudStatus;
+    const accountEmail = cloud.session?.user?.email;
     content().innerHTML = `
       <div class="page">
+        <section class="settings-section">
+          <h3>云端同步</h3>
+          <div class="cloud-status-card">
+            <div class="cloud-status-icon">${accountEmail ? '☁️' : '📱'}</div>
+            <div class="cloud-status-copy">
+              <div class="cloud-status-title" id="settingsCloudTitle">${escapeHTML(cloud.label)}</div>
+              <div class="cloud-status-detail" id="settingsCloudDetail">${escapeHTML(accountEmail || cloud.detail)}</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px">
+            <button class="btn btn-primary btn-sm" style="flex:1" onclick="App.openCloudPanel()">${accountEmail ? '账户与同步' : '登录云端'}</button>
+            ${accountEmail ? '<button class="btn btn-ghost btn-sm" style="flex:1" onclick="App.syncNow()">立即同步</button>' : ''}
+          </div>
+        </section>
         <section class="settings-section">
           <h3>数据概览</h3>
           <div class="data-stats">
@@ -682,13 +738,13 @@
             <input id="importFile" type="file" accept="application/json,.json" hidden onchange="App.importData(this.files[0]);this.value=''">
           </div>
           <div class="settings-row">
-            <div class="settings-info"><div class="settings-label">清空本机数据</div><div class="settings-desc">此操作只影响当前浏览器，且不可撤销</div></div>
+            <div class="settings-info"><div class="settings-label">清空全部数据</div><div class="settings-desc">${accountEmail ? '会从本机和云端删除，其他设备同步后也会清空' : '会清空当前浏览器中的全部内容'}，且不可撤销</div></div>
             <button class="btn btn-danger btn-sm" onclick="App.resetData()">清空</button>
           </div>
         </section>
         <section class="settings-section">
           <h3>关于存储</h3>
-          <p style="color:var(--text-secondary);font-size:14px">工作台内容保存在当前浏览器的本地存储中。网页可在不同设备访问，但数据不会自动同步；请使用导出和导入在设备间迁移。</p>
+          <p style="color:var(--text-secondary);font-size:14px">所有修改都会先保存在本机。登录后，数据会在网络可用时自动同步到新加坡云端；公司网络暂时无法连接时仍可继续使用。</p>
         </section>
         <button class="btn btn-primary" style="width:100%" onclick="App.navigate('overview')">返回工作台</button>
       </div>`;
@@ -718,13 +774,22 @@
         throw new Error('备份格式不正确');
       }
       if (!confirm('导入会替换当前设备上的数据，确定继续吗？')) return;
-      state.data = {
+      const nextData = normalizeData({
         tasks: incoming.tasks,
         notes: incoming.notes,
         events: incoming.events,
         resources: incoming.resources
-      };
+      });
+      const deletedAt = new Date().toISOString();
+      Object.keys(state.data).forEach(collection => {
+        const incomingIds = new Set(nextData[collection].map(item => item.id));
+        state.data[collection]
+          .filter(item => !incomingIds.has(item.id))
+          .forEach(item => queueDelete(collection, item.id, deletedAt));
+      });
+      state.data = nextData;
       save();
+      window.WorkbenchCloud?.queueAll(state.data);
       render();
       toast('数据已导入');
     } catch (error) {
@@ -733,11 +798,123 @@
   }
 
   function resetData() {
-    if (!confirm('确定清空当前浏览器中的全部工作台数据吗？此操作不可撤销。')) return;
+    const isCloudConnected = Boolean(window.WorkbenchCloud?.getSession()?.user);
+    const scope = isCloudConnected
+      ? '本机和云端中的全部工作台数据（其他设备同步后也会清空）'
+      : '当前浏览器中的全部工作台数据';
+    if (!confirm(`确定清空${scope}吗？此操作不可撤销。`)) return;
+    const deletedAt = new Date().toISOString();
+    Object.keys(state.data).forEach(collection => {
+      state.data[collection].forEach(item => queueDelete(collection, item.id, deletedAt));
+    });
     state.data = emptyState();
     save();
     render();
-    toast('本机数据已清空');
+    toast(isCloudConnected ? '全部数据已清空，正在同步' : '本机数据已清空');
+  }
+
+  function updateCloudStatus(nextStatus) {
+    state.cloudStatus = nextStatus;
+    const button = document.getElementById('syncStatusButton');
+    const label = document.getElementById('syncStatusLabel');
+    if (button) {
+      button.className = `sync-status status-${nextStatus.code}`;
+      button.title = nextStatus.detail || nextStatus.label;
+    }
+    if (label) label.textContent = nextStatus.label;
+    const settingsTitle = document.getElementById('settingsCloudTitle');
+    const settingsDetail = document.getElementById('settingsCloudDetail');
+    if (settingsTitle) settingsTitle.textContent = nextStatus.label;
+    if (settingsDetail) {
+      settingsDetail.textContent = nextStatus.session?.user?.email || nextStatus.detail || '';
+    }
+  }
+
+  function openCloudPanel() {
+    const cloud = window.WorkbenchCloud;
+    const session = cloud?.getSession();
+    const status = cloud?.getStatus() || state.cloudStatus;
+    if (session?.user) {
+      openModal('云端同步', `
+        <div class="cloud-status-card">
+          <div class="cloud-status-icon">☁️</div>
+          <div class="cloud-status-copy">
+            <div class="cloud-status-title">${escapeHTML(status.label)}</div>
+            <div class="cloud-status-detail">${escapeHTML(status.detail || '')}</div>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="settings-info">
+            <div class="settings-label">已登录账号</div>
+            <div class="settings-desc">${escapeHTML(session.user.email || '')}</div>
+          </div>
+        </div>
+        <p style="font-size:13px;color:var(--text-secondary);margin:14px 0">修改会先保存在本机，再在网络可用时同步。退出账号不会删除本机数据。</p>
+        <div class="modal-footer" style="padding-left:0;padding-right:0">
+          <button class="btn btn-ghost" type="button" onclick="App.signOutCloud()">退出登录</button>
+          <button class="btn btn-primary" type="button" onclick="App.syncNow()">立即同步</button>
+        </div>`);
+      return;
+    }
+
+    openModal('登录云端', `
+      <form onsubmit="App.submitCloudAuth(event, 'signin')">
+        <div class="field-group">
+          <label class="field-label" for="cloudEmail">邮箱</label>
+          <input class="input" id="cloudEmail" name="email" type="email" autocomplete="email" required placeholder="name@example.com">
+        </div>
+        <div class="field-group">
+          <label class="field-label" for="cloudPassword">密码</label>
+          <input class="input" id="cloudPassword" name="password" type="password" autocomplete="current-password" minlength="8" required placeholder="至少 8 位">
+        </div>
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:14px">首次使用请选择“注册”。若公司网络暂时无法连接，工作台仍会继续保存在本机。</p>
+        <div class="modal-footer" style="padding-left:0;padding-right:0">
+          <button class="btn btn-ghost" type="button" onclick="App.submitCloudAuth(event, 'signup')">注册</button>
+          <button class="btn btn-primary" type="submit">登录</button>
+        </div>
+      </form>`);
+  }
+
+  async function submitCloudAuth(event, mode) {
+    event.preventDefault();
+    const form = document.getElementById('cloudEmail')?.form;
+    if (!form?.reportValidity()) return;
+    const email = form.elements.email.value.trim();
+    const password = form.elements.password.value;
+    try {
+      toast(mode === 'signup' ? '正在注册…' : '正在登录…');
+      if (mode === 'signup') {
+        const result = await window.WorkbenchCloud.signUp(email, password);
+        if (!result.session) {
+          closeModal();
+          toast('请检查邮箱并完成账号验证');
+          return;
+        }
+      } else {
+        await window.WorkbenchCloud.signIn(email, password);
+      }
+      closeModal();
+      toast('云端账号已连接');
+      if (state.page === 'settings') renderSettings();
+    } catch (error) {
+      alert(`云端账号操作失败：${error.message}`);
+    }
+  }
+
+  async function syncNow() {
+    closeModal();
+    await window.WorkbenchCloud?.syncNow({ quiet: false });
+  }
+
+  async function signOutCloud() {
+    try {
+      await window.WorkbenchCloud?.signOut();
+      closeModal();
+      toast('已退出云端账号，本机数据仍保留');
+      if (state.page === 'settings') renderSettings();
+    } catch (error) {
+      alert(`退出失败：${error.message}`);
+    }
   }
 
   function openSearch() {
@@ -823,6 +1000,16 @@
       }
     });
     navigate('overview');
+    window.WorkbenchCloud?.init({
+      getData: () => state.data,
+      setData: nextData => {
+        state.data = normalizeData(nextData);
+        save();
+        render();
+      },
+      onStatus: updateCloudStatus,
+      toast
+    });
   }
 
   window.App = {
@@ -851,6 +1038,10 @@
     exportData,
     importData,
     resetData,
+    openCloudPanel,
+    submitCloudAuth,
+    syncNow,
+    signOutCloud,
     openSearch,
     closeSearch,
     doSearch,
