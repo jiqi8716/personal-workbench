@@ -7,7 +7,7 @@
     tasks: '任务',
     notes: '笔记',
     schedule: '日程',
-    resources: '资源',
+    goals: '长期目标',
     settings: '设置'
   };
 
@@ -21,11 +21,13 @@
   const state = {
     data: emptyState(),
     page: 'overview',
-    taskFilter: 'all',
-    resourceFilter: 'all',
+    taskFilter: 'open',
+    scheduleView: 'calendar',
     calendarCursor: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
     selectedDate: toDateInput(new Date()),
     currentNoteId: null,
+    noteEditor: null,
+    noteSaveTimer: null,
     toastTimer: null,
     cloudStatus: {
       code: 'local',
@@ -88,7 +90,47 @@
           }))
         : [];
     });
+    normalized.tasks = normalized.tasks.map(task => {
+      const completed = task.completed === true || task.status === 'done';
+      return {
+        ...task,
+        status: completed ? 'done' : 'todo',
+        completed,
+        completedAt: completed ? (task.completedAt || task.updatedAt || fallbackTime) : '',
+        plannedDate: task.plannedDate || '',
+        plannedStart: task.plannedStart || '',
+        plannedEnd: task.plannedEnd || '',
+        deadlineDate: Object.prototype.hasOwnProperty.call(task, 'deadlineDate')
+          ? (task.deadlineDate || '')
+          : (task.due || ''),
+        deadlineTime: task.deadlineTime || ''
+      };
+    });
+    normalized.notes = normalized.notes.map(note => ({
+      ...note,
+      kind: note.kind === 'goal' ? 'goal' : 'note'
+    }));
     return normalized;
+  }
+
+  function isTaskDone(task) {
+    return task.completed === true || task.status === 'done';
+  }
+
+  function taskPlanLabel(task) {
+    if (!task.plannedDate) return '';
+    const date = formatDate(task.plannedDate);
+    if (!task.plannedStart) return `计划 ${date}`;
+    const time = task.plannedEnd
+      ? `${task.plannedStart}–${task.plannedEnd}`
+      : task.plannedStart;
+    return `计划 ${date} ${time}`;
+  }
+
+  function taskDeadlineLabel(task, includeDate = true) {
+    if (!task.deadlineDate) return '';
+    const date = includeDate ? `${formatDate(task.deadlineDate)} ` : '';
+    return `DDL ${date}${task.deadlineTime || '当天'}`;
   }
 
   function load() {
@@ -137,7 +179,7 @@
       tasks: renderTasks,
       notes: renderNotes,
       schedule: renderSchedule,
-      resources: renderResources,
+      goals: renderGoals,
       settings: renderSettings
     };
     renderers[state.page]();
@@ -147,15 +189,13 @@
     const hour = new Date().getHours();
     const greeting = hour < 6 ? '夜深了' : hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好';
     const today = toDateInput(new Date());
-    const activeTasks = state.data.tasks.filter(task => task.status !== 'done');
-    const dueTasks = activeTasks
-      .filter(task => task.due)
-      .sort((a, b) => a.due.localeCompare(b.due))
+    const activeTasks = state.data.tasks.filter(task => !isTaskDone(task));
+    const upcomingTasks = activeTasks
+      .filter(task => task.plannedDate || task.deadlineDate)
+      .sort((a, b) => taskSortKey(a).localeCompare(taskSortKey(b)))
       .slice(0, 4);
-    const todayEvents = state.data.events
-      .filter(event => event.date === today)
-      .sort((a, b) => a.time.localeCompare(b.time))
-      .slice(0, 4);
+    const regularNotes = state.data.notes.filter(note => note.kind !== 'goal');
+    const goals = state.data.notes.filter(note => note.kind === 'goal');
 
     content().innerHTML = `
       <div class="page">
@@ -165,9 +205,9 @@
         </div>
         <div class="stat-grid">
           ${statCard('📋', activeTasks.length, '待办任务', 'var(--primary-light)')}
-          ${statCard('✅', state.data.tasks.filter(task => task.status === 'done').length, '已完成', 'var(--success-light)')}
-          ${statCard('📝', state.data.notes.length, '笔记', 'var(--warning-light)')}
-          ${statCard('🔖', state.data.resources.length, '资源', 'var(--purple-light)')}
+          ${statCard('✅', state.data.tasks.filter(isTaskDone).length, '已完成', 'var(--success-light)')}
+          ${statCard('📝', regularNotes.length, '笔记', 'var(--warning-light)')}
+          ${statCard('◎', goals.length, '长期目标', 'var(--purple-light)')}
         </div>
         <section class="section">
           <div class="section-header">
@@ -175,33 +215,25 @@
             <button class="section-more" onclick="App.navigate('tasks')">查看全部</button>
           </div>
           <div class="section-body">
-            ${dueTasks.length ? dueTasks.map(task => `
+            ${upcomingTasks.length ? upcomingTasks.map(task => `
               <div class="list-item" onclick="App.editTask('${task.id}')">
-                <div class="list-item-icon">${task.status === 'doing' ? '⏳' : '○'}</div>
+                ${taskCheckbox(task)}
                 <div class="list-item-content">
                   <div class="list-item-title">${escapeHTML(task.title)}</div>
-                  <div class="list-item-meta">${formatDate(task.due)}${task.tag ? ` · ${escapeHTML(task.tag)}` : ''}</div>
+                  <div class="list-item-meta">${escapeHTML([taskPlanLabel(task), taskDeadlineLabel(task)].filter(Boolean).join(' · '))}</div>
                 </div>
                 <span class="list-item-badge priority-${task.priority}">${priorityLabel(task.priority)}</span>
               </div>
-            `).join('') : emptyBlock('还没有设置截止日期的任务')}
+            `).join('') : emptyBlock('还没有安排时间的任务')}
           </div>
         </section>
         <section class="section">
           <div class="section-header">
-            <h2 class="section-title">今日日程</h2>
-            <button class="section-more" onclick="App.navigate('schedule')">查看日历</button>
+            <h2 class="section-title">今日安排</h2>
+            <button class="section-more" onclick="App.openScheduleDate('${today}')">查看日历</button>
           </div>
-          <div class="section-body">
-            ${todayEvents.length ? todayEvents.map(event => `
-              <div class="list-item" onclick="App.editEvent('${event.id}')">
-                <div class="list-item-icon">📅</div>
-                <div class="list-item-content">
-                  <div class="list-item-title">${escapeHTML(event.title)}</div>
-                  <div class="list-item-meta">${escapeHTML(event.time || '全天')}${event.note ? ` · ${escapeHTML(event.note)}` : ''}</div>
-                </div>
-              </div>
-            `).join('') : emptyBlock('今天还没有安排')}
+          <div class="section-body overview-agenda">
+            ${renderAgendaForDate(today, true)}
           </div>
         </section>
         <button class="btn btn-ghost" style="width:100%" onclick="App.navigate('settings')">数据管理与设置</button>
@@ -216,19 +248,15 @@
   }
 
   function renderTasks() {
-    const filters = [
-      ['all', '全部'],
-      ['todo', '待办'],
-      ['doing', '进行中'],
-      ['done', '已完成']
-    ];
-    const tasks = state.taskFilter === 'all'
-      ? state.data.tasks
-      : state.data.tasks.filter(task => task.status === state.taskFilter);
+    const filters = [['open', '待办'], ['done', '已完成']];
+    const tasks = state.data.tasks.filter(task =>
+      state.taskFilter === 'done' ? isTaskDone(task) : !isTaskDone(task)
+    );
     const sorted = [...tasks].sort((a, b) => {
-      if (a.status === 'done' && b.status !== 'done') return 1;
-      if (a.status !== 'done' && b.status === 'done') return -1;
-      return (a.due || '9999').localeCompare(b.due || '9999');
+      if (state.taskFilter === 'done') {
+        return (b.completedAt || b.updatedAt).localeCompare(a.completedAt || a.updatedAt);
+      }
+      return taskSortKey(a).localeCompare(taskSortKey(b));
     });
 
     content().innerHTML = `
@@ -243,14 +271,40 @@
       </div>`;
   }
 
+  function taskSortKey(task) {
+    const plan = task.plannedDate
+      ? `${task.plannedDate}T${task.plannedStart || '00:00'}`
+      : '9999-12-31T23:59';
+    const deadline = task.deadlineDate
+      ? `${task.deadlineDate}T${task.deadlineTime || '23:59'}`
+      : '9999-12-31T23:59';
+    return plan < deadline ? plan : deadline;
+  }
+
+  function taskCheckbox(task, className = '') {
+    const done = isTaskDone(task);
+    return `<button class="task-checkbox ${done ? 'checked' : ''} ${className}" type="button"
+      role="checkbox" aria-checked="${done}" aria-label="${done ? '恢复' : '完成'}${escapeHTML(task.title)}"
+      onclick="event.stopPropagation();App.toggleTask('${task.id}')">${done ? '✓' : ''}</button>`;
+  }
+
   function taskCard(task) {
-    const overdue = task.due && task.due < toDateInput(new Date()) && task.status !== 'done';
-    return `<article class="task-card status-${task.status}" onclick="App.editTask('${task.id}')">
-      <div class="task-card-title ${task.status === 'done' ? 'done' : ''}">${escapeHTML(task.title)}</div>
-      <div class="task-card-meta">
-        <span class="priority-badge priority-${task.priority}">${priorityLabel(task.priority)}</span>
-        ${task.tag ? `<span class="task-tag">${escapeHTML(task.tag)}</span>` : ''}
-        ${task.due ? `<span class="task-date ${overdue ? 'overdue' : ''}">${overdue ? '已逾期 · ' : ''}${formatDate(task.due)}</span>` : ''}
+    const done = isTaskDone(task);
+    const nowKey = `${toDateInput(new Date())}T${new Date().toTimeString().slice(0, 5)}`;
+    const deadlineKey = task.deadlineDate
+      ? `${task.deadlineDate}T${task.deadlineTime || '23:59'}`
+      : '';
+    const overdue = deadlineKey && deadlineKey < nowKey && !done;
+    return `<article class="task-card ${done ? 'status-done' : ''}" onclick="App.editTask('${task.id}')">
+      ${taskCheckbox(task, 'task-card-checkbox')}
+      <div class="task-card-content">
+        <div class="task-card-title ${done ? 'done' : ''}">${escapeHTML(task.title)}</div>
+        <div class="task-card-meta">
+          <span class="priority-badge priority-${task.priority}">${priorityLabel(task.priority)}</span>
+          ${task.tag ? `<span class="task-tag">${escapeHTML(task.tag)}</span>` : ''}
+          ${task.plannedDate ? `<span class="task-date">${escapeHTML(taskPlanLabel(task))}</span>` : ''}
+          ${task.deadlineDate ? `<span class="task-date ${overdue ? 'overdue' : ''}">${overdue ? '已逾期 · ' : ''}${escapeHTML(taskDeadlineLabel(task))}</span>` : ''}
+        </div>
       </div>
     </article>`;
   }
@@ -268,24 +322,19 @@
     const task = state.data.tasks.find(item => item.id === id) || {
       id: '',
       title: '',
-      status: 'todo',
       priority: 'medium',
-      due: '',
-      tag: ''
+      tag: '',
+      plannedDate: '',
+      plannedStart: '',
+      plannedEnd: '',
+      deadlineDate: '',
+      deadlineTime: ''
     };
     openModal(task.id ? '编辑任务' : '新建任务', `
       <form id="taskForm" onsubmit="App.saveTask(event, '${task.id}')">
         <div class="field-group">
           <label class="field-label" for="taskTitle">任务名称</label>
           <input class="input" id="taskTitle" name="title" value="${escapeHTML(task.title)}" required maxlength="120" autofocus>
-        </div>
-        <div class="field-group">
-          <label class="field-label" for="taskStatus">状态</label>
-          <select class="select" id="taskStatus" name="status">
-            ${option('todo', '待办', task.status)}
-            ${option('doing', '进行中', task.status)}
-            ${option('done', '已完成', task.status)}
-          </select>
         </div>
         <div class="field-group">
           <label class="field-label" for="taskPriority">优先级</label>
@@ -295,10 +344,37 @@
             ${option('low', '低', task.priority)}
           </select>
         </div>
-        <div class="field-group">
-          <label class="field-label" for="taskDue">截止日期</label>
-          <input class="input" id="taskDue" name="due" type="date" value="${escapeHTML(task.due)}">
-        </div>
+        <fieldset class="time-fieldset">
+          <legend>计划时间 <span>我准备什么时候做</span></legend>
+          <div class="field-group">
+            <label class="field-label" for="taskPlannedDate">日期</label>
+            <input class="input" id="taskPlannedDate" name="plannedDate" type="date" value="${escapeHTML(task.plannedDate)}">
+          </div>
+          <div class="time-row">
+            <div class="field-group">
+              <label class="field-label" for="taskPlannedStart">开始</label>
+              <input class="input" id="taskPlannedStart" name="plannedStart" type="time" value="${escapeHTML(task.plannedStart)}">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="taskPlannedEnd">结束</label>
+              <input class="input" id="taskPlannedEnd" name="plannedEnd" type="time" value="${escapeHTML(task.plannedEnd)}">
+            </div>
+          </div>
+        </fieldset>
+        <fieldset class="time-fieldset">
+          <legend>DDL <span>最晚什么时候完成</span></legend>
+          <div class="time-row">
+            <div class="field-group">
+              <label class="field-label" for="taskDeadlineDate">截止日期</label>
+              <input class="input" id="taskDeadlineDate" name="deadlineDate" type="date" value="${escapeHTML(task.deadlineDate)}">
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="taskDeadlineTime">具体时间</label>
+              <input class="input" id="taskDeadlineTime" name="deadlineTime" type="time" value="${escapeHTML(task.deadlineTime)}">
+            </div>
+          </div>
+        </fieldset>
+        ${task.id ? `<div class="task-completion-row">${taskCheckbox(task)}<span>${isTaskDone(task) ? '已完成，点击恢复为待办' : '点击直接标记完成'}</span></div>` : ''}
         <div class="field-group">
           <label class="field-label" for="taskTag">标签</label>
           <input class="input" id="taskTag" name="tag" value="${escapeHTML(task.tag)}" maxlength="30" placeholder="例如：工作">
@@ -317,14 +393,37 @@
     const task = {
       id: id || uid('task'),
       title: form.get('title').trim(),
-      status: form.get('status'),
+      status: existing && isTaskDone(existing) ? 'done' : 'todo',
+      completed: existing ? isTaskDone(existing) : false,
+      completedAt: existing?.completedAt || '',
       priority: form.get('priority'),
-      due: form.get('due'),
+      plannedDate: form.get('plannedDate'),
+      plannedStart: form.get('plannedStart'),
+      plannedEnd: form.get('plannedEnd'),
+      deadlineDate: form.get('deadlineDate'),
+      deadlineTime: form.get('deadlineTime'),
+      due: '',
       tag: form.get('tag').trim(),
       createdAt: existing?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
     if (!task.title) return;
+    if ((task.plannedStart || task.plannedEnd) && !task.plannedDate) {
+      alert('设置计划时间前，请先选择计划日期');
+      return;
+    }
+    if (task.plannedEnd && !task.plannedStart) {
+      alert('设置结束时间前，请先选择开始时间');
+      return;
+    }
+    if (task.plannedStart && task.plannedEnd && task.plannedEnd <= task.plannedStart) {
+      alert('计划结束时间需要晚于开始时间');
+      return;
+    }
+    if (task.deadlineTime && !task.deadlineDate) {
+      alert('设置具体 DDL 时间前，请先选择截止日期');
+      return;
+    }
     if (existing) Object.assign(existing, task);
     else state.data.tasks.unshift(task);
     save();
@@ -332,6 +431,21 @@
     closeModal();
     render();
     toast('任务已保存');
+  }
+
+  function toggleTask(id) {
+    const task = state.data.tasks.find(item => item.id === id);
+    if (!task) return;
+    const completed = !isTaskDone(task);
+    task.completed = completed;
+    task.status = completed ? 'done' : 'todo';
+    task.completedAt = completed ? new Date().toISOString() : '';
+    task.updatedAt = new Date().toISOString();
+    save();
+    queueUpsert('tasks', task);
+    if (document.getElementById('modalOverlay').classList.contains('active')) closeModal();
+    render();
+    toast(completed ? '已完成' : '已恢复为待办');
   }
 
   function deleteTask(id) {
@@ -345,27 +459,65 @@
   }
 
   function renderNotes() {
-    const notes = [...state.data.notes].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const notes = state.data.notes
+      .filter(note => note.kind !== 'goal')
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     content().innerHTML = `
       <div class="page notes-layout">
         <div class="notes-list">
           ${notes.length ? notes.map(note => `
             <article class="note-item" onclick="App.openNote('${note.id}')">
               <div class="note-item-title">${escapeHTML(note.title || '无标题')}</div>
-              <div class="note-item-preview">${escapeHTML(note.content || '空白笔记')}</div>
+              <div class="note-item-preview markdown-card">${renderMarkdown(note.content || '*空白笔记*', true)}</div>
               <div class="note-item-date">${formatDateTime(note.updatedAt)}</div>
             </article>
           `).join('') : emptyBlock('还没有笔记')}
         </div>
-        <button class="btn-fab" onclick="App.createNote()" aria-label="添加笔记">＋</button>
+        <button class="btn-fab" onclick="App.createNote('note')" aria-label="添加笔记">＋</button>
       </div>`;
   }
 
-  function createNote() {
+  function renderMarkdown(source, compact = false) {
+    const html = window.marked ? marked.parse(source || '') : `<p>${escapeHTML(source || '')}</p>`;
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    template.content.querySelectorAll('script, iframe, object, embed, style, link, meta, form').forEach(node => node.remove());
+    template.content.querySelectorAll('*').forEach(node => {
+      [...node.attributes].forEach(attribute => {
+        const name = attribute.name.toLowerCase();
+        if (name.startsWith('on') || name === 'srcdoc') node.removeAttribute(attribute.name);
+      });
+    });
+    template.content.querySelectorAll('a').forEach(link => {
+      const safeUrl = safeExternalUrl(link.getAttribute('href'));
+      if (!safeUrl) link.removeAttribute('href');
+      else {
+        link.href = safeUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+      }
+    });
+    template.content.querySelectorAll('img').forEach(image => {
+      if (compact) {
+        image.remove();
+        return;
+      }
+      const safeUrl = safeExternalUrl(image.getAttribute('src'));
+      if (!safeUrl) image.remove();
+      else image.src = safeUrl;
+    });
+    if (compact) {
+      template.content.querySelectorAll('pre, table, hr').forEach(node => node.remove());
+    }
+    return template.innerHTML;
+  }
+
+  function createNote(kind = 'note') {
     const note = {
       id: uid('note'),
       title: '',
       content: '',
+      kind: kind === 'goal' ? 'goal' : 'note',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -380,9 +532,37 @@
     if (!note) return;
     state.currentNoteId = id;
     document.getElementById('noteTitleInput').value = note.title;
-    document.getElementById('noteTextarea').value = note.content;
+    document.getElementById('noteEditorContext').textContent = note.kind === 'goal' ? '长期目标' : 'Markdown 笔记';
     document.getElementById('noteEditorPage').classList.add('active');
-    switchNoteTab('edit');
+    const host = document.getElementById('noteLiveEditor');
+    host.innerHTML = '';
+    if (window.Vditor) {
+      state.noteEditor = new Vditor('noteLiveEditor', {
+        cdn: './vendor/vditor',
+        mode: 'ir',
+        lang: 'zh_CN',
+        height: '100%',
+        minHeight: 360,
+        value: note.content || '',
+        placeholder: note.kind === 'goal' ? '写下这个长期目标，以及它为什么重要…' : '开始写作，Markdown 会在输入时直接呈现…',
+        cache: { enable: false },
+        typewriterMode: false,
+        toolbar: [
+          'headings', 'bold', 'italic', 'strike', '|',
+          'list', 'ordered-list', 'check', 'quote', 'code', 'link', '|',
+          'undo', 'redo'
+        ],
+        preview: {
+          hljs: { enable: false },
+          markdown: { sanitize: true }
+        },
+        input: value => scheduleNoteSave(value),
+        blur: value => persistCurrentNote(value)
+      });
+    } else {
+      host.innerHTML = `<textarea class="note-fallback" id="noteFallback" placeholder="在此输入 Markdown 内容…">${escapeHTML(note.content)}</textarea>`;
+      document.getElementById('noteFallback').addEventListener('input', event => scheduleNoteSave(event.target.value));
+    }
   }
 
   function currentNote() {
@@ -395,55 +575,43 @@
     note.title = document.getElementById('noteTitleInput').value;
     note.updatedAt = new Date().toISOString();
     save();
-    queueUpsert('notes', note);
+    clearTimeout(state.noteSaveTimer);
+    state.noteSaveTimer = setTimeout(() => queueUpsert('notes', note), 450);
   }
 
-  function updateNoteContent() {
+  function scheduleNoteSave(value) {
     const note = currentNote();
     if (!note) return;
-    note.content = document.getElementById('noteTextarea').value;
+    note.content = value;
+    note.updatedAt = new Date().toISOString();
+    save();
+    clearTimeout(state.noteSaveTimer);
+    state.noteSaveTimer = setTimeout(() => queueUpsert('notes', note), 450);
+  }
+
+  function persistCurrentNote(value) {
+    const note = currentNote();
+    if (!note) return;
+    if (typeof value === 'string') note.content = value;
     note.updatedAt = new Date().toISOString();
     save();
     queueUpsert('notes', note);
   }
 
-  function switchNoteTab(tab) {
-    const edit = tab === 'edit';
-    document.getElementById('tabEdit').classList.toggle('active', edit);
-    document.getElementById('tabPreview').classList.toggle('active', !edit);
-    document.getElementById('noteTextarea').style.display = edit ? '' : 'none';
-    const preview = document.getElementById('notePreviewArea');
-    preview.style.display = edit ? 'none' : '';
-    if (!edit) {
-      const note = currentNote();
-      const source = note?.content || '*空白笔记*';
-      preview.innerHTML = window.marked ? marked.parse(source) : `<p>${escapeHTML(source)}</p>`;
-      preview.querySelectorAll('a').forEach(link => {
-        const safeUrl = safeExternalUrl(link.getAttribute('href'));
-        if (!safeUrl) link.removeAttribute('href');
-        else {
-          link.href = safeUrl;
-          link.target = '_blank';
-          link.rel = 'noopener noreferrer';
-        }
-      });
-      preview.querySelectorAll('script, iframe, object, embed, style, link, meta').forEach(node => node.remove());
-      preview.querySelectorAll('*').forEach(node => {
-        [...node.attributes].forEach(attribute => {
-          if (attribute.name.toLowerCase().startsWith('on')) node.removeAttribute(attribute.name);
-        });
-      });
-    }
-  }
-
   function closeNoteEditor() {
+    clearTimeout(state.noteSaveTimer);
+    const value = state.noteEditor?.getValue?.() ?? document.getElementById('noteFallback')?.value;
+    if (typeof value === 'string') persistCurrentNote(value);
+    state.noteEditor?.destroy?.();
+    state.noteEditor = null;
     document.getElementById('noteEditorPage').classList.remove('active');
     state.currentNoteId = null;
-    renderNotes();
+    render();
   }
 
   function deleteNoteCurrent() {
-    if (!state.currentNoteId || !confirm('确定删除这篇笔记吗？')) return;
+    const note = currentNote();
+    if (!note || !confirm(`确定删除这个${note.kind === 'goal' ? '长期目标' : '笔记'}吗？`)) return;
     const deletedId = state.currentNoteId;
     state.data.notes = state.data.notes.filter(note => note.id !== state.currentNoteId);
     save();
@@ -453,6 +621,33 @@
   }
 
   function renderSchedule() {
+    const viewSwitch = `
+      <div class="schedule-switch" role="tablist" aria-label="日程视图">
+        <button class="${state.scheduleView === 'calendar' ? 'active' : ''}" role="tab" onclick="App.setScheduleView('calendar')">日历</button>
+        <button class="${state.scheduleView === 'upcoming' ? 'active' : ''}" role="tab" onclick="App.setScheduleView('upcoming')">接下来</button>
+      </div>`;
+    content().innerHTML = `
+      <div class="page schedule-page">
+        ${viewSwitch}
+        ${state.scheduleView === 'calendar' ? renderCalendarView() : renderUpcomingView()}
+        <button class="btn-fab" onclick="App.editEvent('', '${state.selectedDate}')" aria-label="添加日程">＋</button>
+      </div>`;
+  }
+
+  function setScheduleView(view) {
+    state.scheduleView = view === 'upcoming' ? 'upcoming' : 'calendar';
+    renderSchedule();
+  }
+
+  function openScheduleDate(date) {
+    state.selectedDate = date;
+    const selected = new Date(`${date}T00:00:00`);
+    state.calendarCursor = new Date(selected.getFullYear(), selected.getMonth(), 1);
+    state.scheduleView = 'calendar';
+    navigate('schedule');
+  }
+
+  function renderCalendarView() {
     const year = state.calendarCursor.getFullYear();
     const month = state.calendarCursor.getMonth();
     const firstDay = new Date(year, month, 1);
@@ -462,37 +657,37 @@
       day.setDate(gridStart.getDate() + index);
       return day;
     });
-    const events = state.data.events
-      .filter(event => event.date === state.selectedDate)
-      .sort((a, b) => a.time.localeCompare(b.time));
 
-    content().innerHTML = `
-      <div class="page">
-        <div class="calendar-header">
-          <button class="cal-nav-btn" onclick="App.changeMonth(-1)" aria-label="上个月">‹</button>
-          <div class="calendar-month">${year} 年 ${month + 1} 月</div>
-          <button class="cal-nav-btn" onclick="App.changeMonth(1)" aria-label="下个月">›</button>
+    return `
+      <div class="calendar-header">
+        <button class="cal-nav-btn" onclick="App.changeMonth(-1)" aria-label="上个月">‹</button>
+        <div class="calendar-month">${year} 年 ${month + 1} 月</div>
+        <button class="cal-nav-btn" onclick="App.changeMonth(1)" aria-label="下个月">›</button>
+      </div>
+      <div class="calendar-legend">
+        <span><i class="legend-dot event"></i>日程</span>
+        <span><i class="legend-dot task"></i>计划任务</span>
+        <span><i class="legend-dot deadline"></i>DDL</span>
+      </div>
+      <div class="calendar-grid">
+        ${['日', '一', '二', '三', '四', '五', '六'].map(day => `<div class="cal-day-header">${day}</div>`).join('')}
+        ${days.map(day => calendarDay(day, month)).join('')}
+      </div>
+      <section class="section">
+        <div class="section-header">
+          <h2 class="section-title">${formatDate(state.selectedDate, { year: 'numeric' })} 的安排</h2>
+          <button class="section-more" onclick="App.editEvent('', '${state.selectedDate}')">添加日程</button>
         </div>
-        <div class="calendar-grid">
-          ${['日', '一', '二', '三', '四', '五', '六'].map(day => `<div class="cal-day-header">${day}</div>`).join('')}
-          ${days.map(day => calendarDay(day, month)).join('')}
+        <div class="section-body today-events">
+          ${renderAgendaForDate(state.selectedDate)}
         </div>
-        <section class="section">
-          <div class="section-header">
-            <h2 class="section-title">${formatDate(state.selectedDate, { year: 'numeric' })} 的日程</h2>
-            <button class="section-more" onclick="App.editEvent('', '${state.selectedDate}')">添加</button>
-          </div>
-          <div class="section-body today-events">
-            ${events.length ? events.map(eventCard).join('') : emptyBlock('当天没有日程')}
-          </div>
-        </section>
-        <button class="btn-fab" onclick="App.editEvent('', '${state.selectedDate}')" aria-label="添加日程">＋</button>
-      </div>`;
+      </section>`;
   }
 
   function calendarDay(day, currentMonth) {
     const date = toDateInput(day);
-    const count = state.data.events.filter(event => event.date === date).length;
+    const entries = agendaEntries(date);
+    const kinds = [...new Set(entries.map(entry => entry.kind))];
     const classes = [
       'cal-day',
       day.getMonth() !== currentMonth ? 'other-month' : '',
@@ -500,15 +695,104 @@
     ].filter(Boolean).join(' ');
     return `<button class="${classes}" style="${date === state.selectedDate ? 'box-shadow:inset 0 0 0 2px var(--primary)' : ''}" onclick="App.selectDate('${date}')">
       <span class="cal-day-num">${day.getDate()}</span>
-      <span class="cal-event-dots">${Array.from({ length: Math.min(count, 3) }, () => '<i class="cal-event-dot"></i>').join('')}</span>
+      <span class="cal-event-dots">${kinds.slice(0, 3).map(kind => `<i class="cal-event-dot ${kind}"></i>`).join('')}</span>
     </button>`;
   }
 
-  function eventCard(event) {
-    return `<article class="event-card" onclick="App.editEvent('${event.id}')">
-      <div class="event-time"><div class="event-time-hour">${escapeHTML(event.time || '全天')}</div><div class="event-time-label">时间</div></div>
-      <div class="event-info"><div class="event-title">${escapeHTML(event.title)}</div><div class="event-note">${escapeHTML(event.note || '无备注')}</div></div>
+  function agendaEntries(date) {
+    const entries = state.data.events
+      .filter(event => event.date === date)
+      .map(event => ({
+        kind: 'event',
+        time: event.time || '',
+        sortTime: event.time || '00:00',
+        item: event
+      }));
+    state.data.tasks.filter(task => !isTaskDone(task)).forEach(task => {
+      if (task.plannedDate === date) {
+        entries.push({
+          kind: 'task',
+          time: task.plannedStart || '',
+          sortTime: task.plannedStart || '00:00',
+          item: task
+        });
+      }
+      if (task.deadlineDate === date && task.plannedDate !== date) {
+        entries.push({
+          kind: 'deadline',
+          time: task.deadlineTime || '',
+          sortTime: task.deadlineTime || '23:59',
+          item: task
+        });
+      }
+    });
+    return entries.sort((a, b) => {
+      const allDayA = a.time ? 1 : 0;
+      const allDayB = b.time ? 1 : 0;
+      if (allDayA !== allDayB) return allDayA - allDayB;
+      return a.sortTime.localeCompare(b.sortTime);
+    });
+  }
+
+  function renderAgendaForDate(date, compact = false) {
+    const entries = agendaEntries(date);
+    if (!entries.length) return emptyBlock('当天还没有安排');
+    return entries.map(entry => agendaCard(entry, date, compact)).join('');
+  }
+
+  function agendaCard(entry, date, compact = false) {
+    const item = entry.item;
+    if (entry.kind === 'event') {
+      return `<article class="agenda-card agenda-event ${compact ? 'compact' : ''}" onclick="App.editEvent('${item.id}')">
+        <div class="agenda-time"><strong>${escapeHTML(item.time || '全天')}</strong><span>日程</span></div>
+        <div class="agenda-info">
+          <div class="agenda-title">${escapeHTML(item.title)}</div>
+          ${item.note ? `<div class="agenda-note">${escapeHTML(item.note)}</div>` : ''}
+        </div>
+      </article>`;
+    }
+    const isDeadline = entry.kind === 'deadline';
+    const timeLabel = isDeadline
+      ? (item.deadlineTime || '当天')
+      : (item.plannedStart
+        ? `${item.plannedStart}${item.plannedEnd ? `–${item.plannedEnd}` : ''}`
+        : '全天');
+    const sameDayDeadline = !isDeadline && item.deadlineDate === date;
+    return `<article class="agenda-card agenda-${entry.kind} ${compact ? 'compact' : ''}" onclick="App.editTask('${item.id}')">
+      ${taskCheckbox(item, 'agenda-checkbox')}
+      <div class="agenda-time"><strong>${escapeHTML(timeLabel)}</strong><span>${isDeadline ? 'DDL' : '计划任务'}</span></div>
+      <div class="agenda-info">
+        <div class="agenda-title">${escapeHTML(item.title)}</div>
+        <div class="agenda-note">${sameDayDeadline ? escapeHTML(taskDeadlineLabel(item, false)) : escapeHTML(item.tag || '')}</div>
+      </div>
     </article>`;
+  }
+
+  function renderUpcomingView() {
+    const today = toDateInput(new Date());
+    const dateSet = new Set();
+    state.data.events.forEach(event => {
+      if (event.date >= today) dateSet.add(event.date);
+    });
+    state.data.tasks.filter(task => !isTaskDone(task)).forEach(task => {
+      if (task.plannedDate >= today) dateSet.add(task.plannedDate);
+      if (task.deadlineDate >= today) dateSet.add(task.deadlineDate);
+    });
+    const dates = [...dateSet].sort();
+    if (!dates.length) return `<div class="upcoming-empty">${emptyBlock('接下来还没有安排')}</div>`;
+    return `<div class="upcoming-list">
+      ${dates.map((date, index) => {
+        const weekday = new Intl.DateTimeFormat('zh-CN', { weekday: 'short' }).format(new Date(`${date}T00:00:00`));
+        const relative = date === today ? '今天' : index === 0 ? '接下来' : '';
+        return `<section class="upcoming-day">
+          <div class="upcoming-date">
+            <div><strong>${formatDate(date, { year: date.slice(0, 4) !== today.slice(0, 4) ? 'numeric' : undefined })}</strong><span>${weekday}</span></div>
+            ${relative ? `<em>${relative}</em>` : ''}
+          </div>
+          <div class="upcoming-items">${renderAgendaForDate(date)}</div>
+        </section>`;
+      }).join('')}
+    </div>`;
   }
 
   function changeMonth(offset) {
@@ -583,39 +867,30 @@
     toast('日程已删除');
   }
 
-  function renderResources() {
-    const filters = [['all', '全部'], ['link', '链接'], ['document', '文档'], ['tool', '工具'], ['other', '其他']];
-    const items = state.resourceFilter === 'all'
-      ? state.data.resources
-      : state.data.resources.filter(item => item.type === state.resourceFilter);
+  function renderGoals() {
+    const goals = state.data.notes
+      .filter(note => note.kind === 'goal')
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     content().innerHTML = `
-      <div class="page">
-        <div class="resources-toolbar">
-          <div class="resource-filters">
-            ${filters.map(([key, label]) => `<button class="filter-chip ${state.resourceFilter === key ? 'active' : ''}" onclick="App.setResourceFilter('${key}')">${label}</button>`).join('')}
-          </div>
+      <div class="page goals-page">
+        <div class="goals-intro">
+          <span>长期方向</span>
+          <p>记录真正重要、值得长期投入的事情。这里不追踪进度，只帮助你保持方向。</p>
         </div>
-        <div class="resources-grid">
-          ${items.length ? items.map(resourceCard).join('') : emptyBlock('还没有收藏资源')}
+        <div class="goals-list">
+          ${goals.length ? goals.map(goal => `
+            <article class="goal-card" onclick="App.openNote('${goal.id}')">
+              <div class="goal-marker">◎</div>
+              <div class="goal-content">
+                <div class="goal-title">${escapeHTML(goal.title || '未命名目标')}</div>
+                <div class="goal-preview markdown-card">${renderMarkdown(goal.content || '*写下它为什么重要*', true)}</div>
+                <div class="note-item-date">${formatDateTime(goal.updatedAt)}</div>
+              </div>
+            </article>
+          `).join('') : emptyBlock('还没有长期目标')}
         </div>
-        <button class="btn-fab" onclick="App.editResource()" aria-label="添加资源">＋</button>
+        <button class="btn-fab" onclick="App.createNote('goal')" aria-label="添加长期目标">＋</button>
       </div>`;
-  }
-
-  function resourceCard(item) {
-    const icons = { link: '🔗', document: '📄', tool: '🧰', other: '📦' };
-    const safeUrl = safeExternalUrl(item.url);
-    return `<article class="resource-card" onclick="App.editResource('${item.id}')">
-      <div class="resource-top">
-        <div class="resource-icon" style="background:var(--primary-light)">${icons[item.type] || icons.other}</div>
-        <div class="resource-info">
-          <div class="resource-title">${escapeHTML(item.title)}</div>
-          <div class="resource-desc">${escapeHTML(item.description || '暂无描述')}</div>
-        </div>
-      </div>
-      ${safeUrl ? `<div class="resource-url" onclick="event.stopPropagation();App.openResource('${item.id}')">${escapeHTML(item.url)}</div>` : ''}
-      <div class="resource-tags">${(item.tags || []).map(tag => `<span class="resource-tag">${escapeHTML(tag)}</span>`).join('')}</div>
-    </article>`;
   }
 
   function safeExternalUrl(value) {
@@ -627,75 +902,6 @@
     } catch {
       return '';
     }
-  }
-
-  function openResource(id) {
-    const item = state.data.resources.find(resource => resource.id === id);
-    const url = safeExternalUrl(item?.url);
-    if (url) window.open(url, '_blank', 'noopener,noreferrer');
-  }
-
-  function setResourceFilter(filter) {
-    state.resourceFilter = filter;
-    renderResources();
-  }
-
-  function editResource(id = '') {
-    const item = state.data.resources.find(resource => resource.id === id) || {
-      id: '',
-      title: '',
-      type: 'link',
-      url: '',
-      description: '',
-      tags: []
-    };
-    openModal(item.id ? '编辑资源' : '新建资源', `
-      <form onsubmit="App.saveResource(event, '${item.id}')">
-        <div class="field-group"><label class="field-label" for="resourceTitle">名称</label><input class="input" id="resourceTitle" name="title" value="${escapeHTML(item.title)}" required maxlength="120"></div>
-        <div class="field-group"><label class="field-label" for="resourceType">类型</label><select class="select" id="resourceType" name="type">
-          ${option('link', '链接', item.type)}${option('document', '文档', item.type)}${option('tool', '工具', item.type)}${option('other', '其他', item.type)}
-        </select></div>
-        <div class="field-group"><label class="field-label" for="resourceUrl">网址</label><input class="input" id="resourceUrl" name="url" type="text" inputmode="url" value="${escapeHTML(item.url)}" placeholder="https://example.com"></div>
-        <div class="field-group"><label class="field-label" for="resourceDescription">描述</label><textarea class="textarea" id="resourceDescription" name="description" maxlength="300">${escapeHTML(item.description)}</textarea></div>
-        <div class="field-group"><label class="field-label" for="resourceTags">标签（用逗号分隔）</label><input class="input" id="resourceTags" name="tags" value="${escapeHTML((item.tags || []).join(', '))}"></div>
-        <div class="modal-footer" style="padding-left:0;padding-right:0">
-          ${item.id ? `<button class="btn btn-danger" type="button" onclick="App.deleteResource('${item.id}')">删除</button>` : ''}
-          <button class="btn btn-primary" type="submit">保存</button>
-        </div>
-      </form>`);
-  }
-
-  function saveResource(event, id) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const existing = state.data.resources.find(item => item.id === id);
-    const item = {
-      id: id || uid('resource'),
-      title: form.get('title').trim(),
-      type: form.get('type'),
-      url: form.get('url').trim(),
-      description: form.get('description').trim(),
-      tags: form.get('tags').split(/[,，]/).map(tag => tag.trim()).filter(Boolean).slice(0, 8),
-      createdAt: existing?.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    if (existing) Object.assign(existing, item);
-    else state.data.resources.unshift(item);
-    save();
-    queueUpsert('resources', item);
-    closeModal();
-    render();
-    toast('资源已保存');
-  }
-
-  function deleteResource(id) {
-    if (!confirm('确定删除这个资源吗？')) return;
-    state.data.resources = state.data.resources.filter(item => item.id !== id);
-    save();
-    queueDelete('resources', id);
-    closeModal();
-    render();
-    toast('资源已删除');
   }
 
   function renderSettings() {
@@ -721,10 +927,11 @@
           <h3>数据概览</h3>
           <div class="data-stats">
             <div class="data-stat"><div class="data-stat-value">${state.data.tasks.length}</div><div class="data-stat-label">任务</div></div>
-            <div class="data-stat"><div class="data-stat-value">${state.data.notes.length}</div><div class="data-stat-label">笔记</div></div>
+            <div class="data-stat"><div class="data-stat-value">${state.data.notes.filter(note => note.kind !== 'goal').length}</div><div class="data-stat-label">笔记</div></div>
             <div class="data-stat"><div class="data-stat-value">${state.data.events.length}</div><div class="data-stat-label">日程</div></div>
-            <div class="data-stat"><div class="data-stat-value">${state.data.resources.length}</div><div class="data-stat-label">资源</div></div>
+            <div class="data-stat"><div class="data-stat-value">${state.data.notes.filter(note => note.kind === 'goal').length}</div><div class="data-stat-label">目标</div></div>
           </div>
+          ${state.data.resources.length ? `<p class="archived-data-note">另有 ${state.data.resources.length} 条旧资源数据被安全保留在备份中。</p>` : ''}
         </section>
         <section class="settings-section">
           <h3>备份与迁移</h3>
@@ -752,7 +959,7 @@
 
   function exportData() {
     const payload = {
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       data: state.data
     };
@@ -937,23 +1144,32 @@
     }
     const results = [
       ...state.data.tasks.filter(item => `${item.title} ${item.tag}`.toLowerCase().includes(value)).map(item => ({ type: 'tasks', id: item.id, icon: '📋', title: item.title, label: '任务' })),
-      ...state.data.notes.filter(item => `${item.title} ${item.content}`.toLowerCase().includes(value)).map(item => ({ type: 'notes', id: item.id, icon: '📝', title: item.title || '无标题', label: '笔记' })),
-      ...state.data.resources.filter(item => `${item.title} ${item.description} ${(item.tags || []).join(' ')}`.toLowerCase().includes(value)).map(item => ({ type: 'resources', id: item.id, icon: '🔖', title: item.title, label: '资源' }))
+      ...state.data.events.filter(item => `${item.title} ${item.note}`.toLowerCase().includes(value)).map(item => ({ type: 'schedule', id: item.id, date: item.date, icon: '📅', title: item.title, label: '日程' })),
+      ...state.data.notes.filter(item => `${item.title} ${item.content}`.toLowerCase().includes(value)).map(item => ({
+        type: item.kind === 'goal' ? 'goals' : 'notes',
+        id: item.id,
+        icon: item.kind === 'goal' ? '◎' : '📝',
+        title: item.title || '无标题',
+        label: item.kind === 'goal' ? '长期目标' : '笔记'
+      }))
     ].slice(0, 30);
     document.getElementById('searchResults').innerHTML = results.length ? results.map(result => `
-      <div class="search-result-item" onclick="App.openSearchResult('${result.type}', '${result.id}')">
+      <div class="search-result-item" onclick="App.openSearchResult('${result.type}', '${result.id}', '${result.date || ''}')">
         <span class="search-result-icon">${result.icon}</span>
         <span class="search-result-info"><span class="search-result-title">${escapeHTML(result.title)}</span><span class="search-result-type">${result.label}</span></span>
       </div>
     `).join('') : emptyBlock('没有找到匹配内容');
   }
 
-  function openSearchResult(type, id) {
+  function openSearchResult(type, id, date = '') {
     closeSearch();
     navigate(type);
     if (type === 'tasks') editTask(id);
-    if (type === 'notes') openNote(id);
-    if (type === 'resources') editResource(id);
+    if (type === 'notes' || type === 'goals') openNote(id);
+    if (type === 'schedule') {
+      if (date) selectDate(date);
+      editEvent(id);
+    }
   }
 
   function option(value, label, selected) {
@@ -1017,24 +1233,20 @@
     setTaskFilter,
     editTask,
     saveTask,
+    toggleTask,
     deleteTask,
     createNote,
     openNote,
     updateNoteTitle,
-    updateNoteContent,
-    switchNoteTab,
     closeNoteEditor,
     deleteNoteCurrent,
+    setScheduleView,
+    openScheduleDate,
     changeMonth,
     selectDate,
     editEvent,
     saveEvent,
     deleteEvent,
-    setResourceFilter,
-    openResource,
-    editResource,
-    saveResource,
-    deleteResource,
     exportData,
     importData,
     resetData,

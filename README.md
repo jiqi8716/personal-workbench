@@ -1,6 +1,6 @@
 # 个人工作台
 
-一个纯前端的个人工作台，可管理任务、Markdown 笔记、日程和常用资源。
+一个纯前端的个人工作台，可管理待办、Markdown 笔记、日程和长期目标。
 
 ## 使用
 
@@ -17,6 +17,7 @@ https://jiqi8716.github.io/personal-workbench/
 ## 技术
 
 - 原生 HTML、CSS 和 JavaScript
-- [Marked](https://marked.js.org/) 用于 Markdown 预览（浏览器文件已随站点托管）
+- [Marked](https://marked.js.org/) 用于 Markdown 卡片预览（浏览器文件已随站点托管）
+- [Vditor](https://b3log.org/vditor/) 用于即时渲染 Markdown 编辑（MIT 协议，浏览器文件已随站点托管）
 - [Supabase](https://supabase.com/) 用于邮箱登录和跨设备同步
 - 无需构建步骤
